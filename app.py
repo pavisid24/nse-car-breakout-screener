@@ -3,7 +3,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from nse_data import parse_upload
+from nse_data import parse_upload, fetch_history_calendar_days
 from car_strategy import analyze_car_strategy, apply_universe_filters, parse_symbol_list_upload
 
 st.set_page_config(page_title="NSE CAR Breakout Screener", page_icon="📈", layout="wide")
@@ -24,8 +24,29 @@ with st.sidebar:
     min_float_value = st.number_input("Minimum free-float value (₹ Cr)", 0.0, 100000.0, 1500.0, 100.0)
     require_top500 = st.toggle("Require Nifty 500 membership", value=True)
 
-st.markdown("### 1. Upload official NSE daily Bhavcopy history")
-st.info("Upload multiple NSE CM-UDiFF Common Bhavcopy Final ZIP/CSV files. For the full 52-week high and 200-DMA rules, each stock needs at least 252 daily sessions. Files remain in this app session; upload again after a fresh session unless you maintain your own persistent data store.")
+st.markdown("### 1. Load official NSE daily Bhavcopy history")
+st.info("Easiest option: try the automatic NSE archive downloader first. It requests roughly 430 calendar days to collect about 252 trading sessions. NSE may block or rate-limit cloud-hosted downloads; if that happens, use the manual ZIP/CSV uploader below. Data is end-of-day only.")
+if st.button("⬇️ Fetch approximately 1 year of NSE history", type="primary", use_container_width=True):
+    progress_bar = st.progress(0)
+    status_line = st.empty()
+    def update_progress(done, total, day):
+        progress_bar.progress(done / total)
+        if done % 10 == 0 or done == total:
+            status_line.info(f"Checking {done}/{total} calendar dates; latest checked: {day.isoformat()}")
+    with st.spinner("Requesting NSE daily archives. This can take several minutes..."):
+        fetched, fetch_errors = fetch_history_calendar_days(430, update_progress)
+    if not fetched.empty:
+        st.session_state["car_data"] = fetched
+        st.session_state["car_errors"] = fetch_errors
+        st.success(f"Loaded {len(fetched):,} daily rows across {fetched['Symbol'].nunique():,} symbols, from {fetched['Date'].min().date()} to {fetched['Date'].max().date()}.")
+        st.info("Next, press Run CAR strategy scan below. Upload delivery/fundamental data separately if those filters are enabled.")
+    else:
+        st.error("NSE did not return usable archives. This may be due to NSE access restrictions or cloud IP blocking. Use the manual uploader below, or retry later.")
+    if fetch_errors:
+        with st.expander(f"Download warnings ({len(fetch_errors)} shown)"):
+            st.write(fetch_errors)
+
+st.markdown("#### Or upload NSE Bhavcopy ZIP/CSV files manually")
 bhav_files = st.file_uploader("NSE Bhavcopy ZIP or CSV files", type=["zip", "csv"], accept_multiple_files=True, key="bhav")
 
 st.markdown("### 2. Optional universe and fundamental data")
@@ -40,29 +61,28 @@ with st.expander("Required supplementary CSV format"):
     st.caption("Illustrative row only. AvgDeliveryValue6M_Cr should be the six-month average daily deliverable turnover in ₹ crore. FreeFloatPct should be a defensible free-float percentage, not automatically 100% minus promoter holding.")
 
 if st.button("🔎 Run CAR strategy scan", type="primary", use_container_width=True):
-    if not bhav_files:
-        st.error("Upload at least one NSE Bhavcopy ZIP/CSV first.")
-        st.stop()
     frames, errors = [], []
-    progress = st.progress(0)
-    for i, uploaded in enumerate(bhav_files):
-        try:
-            frame = parse_upload(uploaded.getvalue(), uploaded.name)
-            if not frame.empty:
-                frames.append(frame)
-            else:
-                errors.append(f"{uploaded.name}: no recognized NSE OHLCV rows")
-        except Exception as exc:
-            errors.append(f"{uploaded.name}: {exc}")
-        progress.progress((i + 1) / len(bhav_files))
+    if "car_data" in st.session_state and not st.session_state["car_data"].empty:
+        frames.append(st.session_state["car_data"])
+    if bhav_files:
+        progress = st.progress(0)
+        for i, uploaded in enumerate(bhav_files):
+            try:
+                frame = parse_upload(uploaded.getvalue(), uploaded.name)
+                if not frame.empty:
+                    frames.append(frame)
+                else:
+                    errors.append(f"{uploaded.name}: no recognized NSE OHLCV rows")
+            except Exception as exc:
+                errors.append(f"{uploaded.name}: {exc}")
+            progress.progress((i + 1) / len(bhav_files))
     if not frames:
-        st.error("No usable NSE OHLCV data found. Check that files are CM-UDiFF Common Bhavcopy Final reports.")
-        if errors: st.write(errors)
+        st.error("First use Fetch approximately 1 year of NSE history or upload at least one NSE Bhavcopy ZIP/CSV.")
         st.stop()
     data = pd.concat(frames, ignore_index=True).drop_duplicates(["Symbol", "Date"], keep="last")
     data = data.sort_values(["Symbol", "Date"])
     st.session_state["car_data"] = data
-    st.session_state["car_errors"] = errors
+    st.session_state["car_errors"] = st.session_state.get("car_errors", []) + errors
     st.session_state["car_fno"] = fno_file.getvalue() if fno_file else None
     st.session_state["car_metrics"] = metrics_file.getvalue() if metrics_file else None
     st.session_state["car_params"] = (max_extension, int(car_days), min_volume, min_atr, require_metrics, min_delivery, min_float, min_float_value, require_top500)

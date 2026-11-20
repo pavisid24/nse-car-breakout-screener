@@ -82,6 +82,40 @@ def fetch_one_day(day: date, session: requests.Session | None = None) -> pd.Data
     return parse_upload(response.content, f"bhavcopy_{day:%Y%m%d}.zip")
 
 
+def fetch_history_calendar_days(calendar_days: int = 430, progress_callback=None) -> tuple[pd.DataFrame, list[str]]:
+    """Best-effort download of recent NSE CM UDiFF daily archives.
+
+    NSE may rate-limit or block cloud-hosted requests. Missing dates (weekends,
+    holidays, unpublished files) are skipped; errors are returned for display.
+    """
+    sess = requests.Session()
+    # Establish a browser-like session first; NSE archive access can require cookies.
+    try:
+        sess.get("https://www.nseindia.com/", headers=HEADERS, timeout=15)
+    except Exception:
+        pass
+    all_frames, errors = [], []
+    today = date.today()
+    for offset in range(calendar_days):
+        day = today - timedelta(days=offset)
+        try:
+            frame = fetch_one_day(day, sess)
+            if not frame.empty:
+                all_frames.append(frame)
+        except Exception as exc:
+            # Record a small sample of failures to avoid a huge UI message.
+            if len(errors) < 20:
+                errors.append(f"{day.isoformat()}: {exc}")
+        if progress_callback:
+            progress_callback(offset + 1, calendar_days, day)
+        time.sleep(0.25)
+    if not all_frames:
+        return pd.DataFrame(), errors
+    combined = pd.concat(all_frames, ignore_index=True)
+    combined = combined.drop_duplicates(["Symbol", "Date"], keep="last")
+    return combined.sort_values(["Symbol", "Date"]), errors
+
+
 def fetch_recent(days_back: int = 12) -> tuple[pd.DataFrame, list[str]]:
     """Fetch recent calendar dates (weekends/holidays naturally return no file)."""
     sess = requests.Session()
